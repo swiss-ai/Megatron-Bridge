@@ -15,6 +15,7 @@
 
 """Builder-backed configuration for native Apertus2 models."""
 
+import os
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from typing import ClassVar, cast
@@ -23,6 +24,7 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.training.models.gpt import GPTModelBuilder
 
+from megatron.bridge.models.apertus2.apertus2_provider import _validate_kda_a_log_layout
 from megatron.bridge.models.apertus2.apertus2_spec import build_apertus2_spec
 from megatron.bridge.models.gpt.model_config import BridgeGPTModelConfig
 from megatron.bridge.models.transformer_config import TransformerConfig
@@ -34,6 +36,7 @@ class Apertus2TransformerConfig(TransformerConfig):
 
     layer_types: tuple[str, ...] | None = None
     linear_attn_output_gate_bias: bool = True
+    linear_attn_a_log_per_channel: bool = False
 
 
 @dataclass(kw_only=True)
@@ -60,12 +63,25 @@ class Apertus2ModelBuilder(GPTModelBuilder):
         # GPTModelBuilder reads this selector from the outer GPT model config, not
         # from the nested TransformerConfig. Keep the caller's config untouched.
         model_config.transformer_layer_spec = build_apertus2_spec
-        return GPTModelBuilder(model_config).build_model(
-            pg_collection,
-            pre_process=pre_process,
-            post_process=post_process,
-            vp_stage=vp_stage,
-        )
+
+        # TODO: Remove this env shim once Megatron-LM-MoE exposes a saved KDA layout CLI argument.
+        previous = os.environ.get("KDA_ALOG_PER_CHANNEL")
+        per_channel = model_config.transformer.linear_attn_a_log_per_channel
+        os.environ["KDA_ALOG_PER_CHANNEL"] = "1" if per_channel else "0"
+        try:
+            model = GPTModelBuilder(model_config).build_model(
+                pg_collection,
+                pre_process=pre_process,
+                post_process=post_process,
+                vp_stage=vp_stage,
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("KDA_ALOG_PER_CHANNEL", None)
+            else:
+                os.environ["KDA_ALOG_PER_CHANNEL"] = previous
+        _validate_kda_a_log_layout(model, per_channel)
+        return model
 
 
 __all__ = ["Apertus2ModelBuilder", "Apertus2ModelConfig", "Apertus2TransformerConfig"]

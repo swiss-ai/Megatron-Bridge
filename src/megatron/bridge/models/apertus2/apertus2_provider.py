@@ -15,6 +15,7 @@
 
 """Native Apertus2 provider defaults."""
 
+import os
 from dataclasses import dataclass
 from typing import Callable
 
@@ -24,6 +25,15 @@ from megatron.core.ssm.kimi_delta_attention import KimiDeltaAttention
 
 from megatron.bridge.models.apertus2.apertus2_spec import build_apertus2_spec
 from megatron.bridge.models.gpt_provider import GPTModelProvider
+
+
+def _validate_kda_a_log_layout(model: torch.nn.Module, per_channel: bool) -> None:
+    """Reject a KDA runtime that did not construct the requested checkpoint layout."""
+    for module in model.modules():
+        if isinstance(module, KimiDeltaAttention):
+            expected = (module.num_v_heads_local_tp * (module.key_head_dim if per_channel else 1),)
+            if tuple(module.A_log.shape) != expected:
+                raise ValueError(f"KDA A_log has shape {tuple(module.A_log.shape)}, expected {expected}")
 
 
 def _preserve_kda_decay_parameters(model: list[torch.nn.Module]) -> list[torch.nn.Module]:
@@ -87,6 +97,22 @@ class Apertus2ModelProvider(GPTModelProvider):
     linear_attention_safe_output_gate_lower_bound: float = -5.0
     linear_attention_output_gate_form: str = "per_channel"
     linear_attn_output_gate_bias: bool = True
+    linear_attn_a_log_per_channel: bool = False
+
+    def provide(self, pre_process=None, post_process=None, vp_stage=None):
+        """Construct KDA layers with the checkpoint's A_log layout."""
+        # TODO: Remove this env shim once Megatron-LM-MoE exposes a saved KDA layout CLI argument.
+        previous = os.environ.get("KDA_ALOG_PER_CHANNEL")
+        os.environ["KDA_ALOG_PER_CHANNEL"] = "1" if self.linear_attn_a_log_per_channel else "0"
+        try:
+            model = super().provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
+        finally:
+            if previous is None:
+                os.environ.pop("KDA_ALOG_PER_CHANNEL", None)
+            else:
+                os.environ["KDA_ALOG_PER_CHANNEL"] = previous
+        _validate_kda_a_log_layout(model, self.linear_attn_a_log_per_channel)
+        return model
 
 
 __all__ = ["Apertus2ModelProvider"]

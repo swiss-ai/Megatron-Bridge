@@ -15,21 +15,26 @@
 
 """Unit tests for the Apertus2 model bridge."""
 
+import os
 from types import SimpleNamespace
 
 import pytest
 import torch
 from megatron.core.activations import sssglu_act
 from megatron.core.ssm.kimi_delta_attention import KimiDeltaAttention
+from megatron.training.models.gpt import GPTModelBuilder
 
 from megatron.bridge.models.apertus2.apertus2_bridge import Apertus2Bridge
+from megatron.bridge.models.apertus2.apertus2_builder import Apertus2ModelBuilder
 from megatron.bridge.models.apertus2.apertus2_mapping import (
     build_apertus2_mapping_registry,
 )
 from megatron.bridge.models.apertus2.apertus2_provider import (
     Apertus2ModelProvider,
     _preserve_kda_decay_parameters,
+    _validate_kda_a_log_layout,
 )
+from megatron.bridge.models.gpt_provider import GPTModelProvider
 
 
 def _hf_config(**overrides):
@@ -168,6 +173,25 @@ class TestApertus2ConfigConversion:
         assert result["fp16"] is False
         assert result["params_dtype"] is torch.bfloat16
         assert result["activation_func"] is sssglu_act
+        assert result["linear_attn_a_log_per_channel"] is False
+
+    def test_per_channel_a_log_layout_round_trips(self):
+        bridge = Apertus2Bridge()
+        config = _hf_config(linear_attn_a_log_per_channel=True)
+
+        assert bridge.hf_config_to_provider_kwargs(config)["linear_attn_a_log_per_channel"] is True
+        assert bridge.hf_config_to_model_config(config).transformer.linear_attn_a_log_per_channel is True
+        assert (
+            bridge.megatron_to_hf_config(_provider(linear_attn_a_log_per_channel=True))[
+                "linear_attn_a_log_per_channel"
+            ]
+            is True
+        )
+        assert "linear_attn_a_log_per_channel" not in bridge.megatron_to_hf_config(_provider())
+
+    def test_rejects_non_boolean_a_log_layout(self):
+        with pytest.raises(ValueError, match="linear_attn_a_log_per_channel must be a boolean"):
+            Apertus2Bridge().hf_config_to_provider_kwargs(_hf_config(linear_attn_a_log_per_channel="true"))
 
     def test_builder_config_preserves_apertus2_fields(self):
         result = Apertus2Bridge().hf_config_to_model_config(_hf_config())
@@ -274,6 +298,53 @@ class TestApertus2ConfigConversion:
 
 @pytest.mark.unit
 class TestApertus2MixedPrecision:
+    @pytest.mark.parametrize("per_channel", [False, True])
+    def test_provider_uses_requested_a_log_layout_during_build(self, monkeypatch, per_channel):
+        monkeypatch.setenv("KDA_ALOG_PER_CHANNEL", "previous")
+        seen = []
+
+        def fake_provide(*args, **kwargs):
+            seen.append(os.environ["KDA_ALOG_PER_CHANNEL"])
+            return torch.nn.Module()
+
+        monkeypatch.setattr(GPTModelProvider, "provide", fake_provide)
+        Apertus2ModelProvider(linear_attn_a_log_per_channel=per_channel).provide()
+
+        assert seen == ["1" if per_channel else "0"]
+        assert os.environ["KDA_ALOG_PER_CHANNEL"] == "previous"
+
+    @pytest.mark.parametrize("per_channel", [False, True])
+    def test_builder_uses_requested_a_log_layout_during_build(self, monkeypatch, per_channel):
+        monkeypatch.setenv("KDA_ALOG_PER_CHANNEL", "previous")
+        seen = []
+
+        def fake_build_model(*args, **kwargs):
+            seen.append(os.environ["KDA_ALOG_PER_CHANNEL"])
+            return torch.nn.Module()
+
+        monkeypatch.setattr(GPTModelBuilder, "build_model", fake_build_model)
+        config = Apertus2Bridge().hf_config_to_model_config(_hf_config(linear_attn_a_log_per_channel=per_channel))
+        Apertus2ModelBuilder(config).build_model(pg_collection=None)
+
+        assert seen == ["1" if per_channel else "0"]
+        assert os.environ["KDA_ALOG_PER_CHANNEL"] == "previous"
+
+    @pytest.mark.parametrize("per_channel", [False, True])
+    def test_rejects_kda_a_log_shape_mismatch(self, per_channel):
+        model = torch.nn.Module()
+        module = KimiDeltaAttention.__new__(KimiDeltaAttention)
+        torch.nn.Module.__init__(module)
+        module.num_v_heads_local_tp = 2
+        module.key_head_dim = 4
+        module.A_log = torch.nn.Parameter(torch.ones(2 if per_channel else 8))
+        model.add_module("kda", module)
+
+        with pytest.raises(ValueError, match="KDA A_log has shape"):
+            _validate_kda_a_log_layout(model, per_channel)
+
+        module.A_log = torch.nn.Parameter(torch.ones(8 if per_channel else 2))
+        _validate_kda_a_log_layout(model, per_channel)
+
     def test_provider_registers_kda_precision_hook(self):
         provider = Apertus2ModelProvider()
 
