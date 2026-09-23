@@ -138,10 +138,7 @@ def _optimizer_state_is_fp32_adam(state_dict: Mapping[str, object]) -> bool:
     for state in states.values():
         if not isinstance(state, Mapping) or set(state) != expected_state_names:
             return False
-        if any(
-            not isinstance(value, torch.Tensor) or value.dtype != torch.float32
-            for value in state.values()
-        ):
+        if any(not isinstance(value, torch.Tensor) or value.dtype != torch.float32 for value in state.values()):
             return False
     return True
 
@@ -153,6 +150,106 @@ def _get_te_fused_adam_class() -> type[torch.optim.Optimizer] | None:
     except ImportError:
         return None
     return cast(type[torch.optim.Optimizer], FusedAdam)
+
+
+def _cpu_staging_get_unscaled_state(
+    fallback: Callable[..., object],
+) -> Callable[..., torch.Tensor]:
+    """Wrap a TE state accessor without depending on its call signature."""
+
+    def _get_unscaled_state_on_cpu(*args: object, **kwargs: object) -> torch.Tensor:
+        state = fallback(*args, **kwargs)
+        if not isinstance(state, torch.Tensor):
+            raise TypeError(
+                "Transformer Engine FusedAdam.get_unscaled_state() must return a torch.Tensor "
+                f"for CPU checkpoint staging, but returned {type(state).__name__}."
+            )
+        return state.cpu()
+
+    return _get_unscaled_state_on_cpu
+
+
+@contextmanager
+def memory_efficient_precision_aware_optimizer_state_checkpointing(
+    optimizer: MegatronOptimizer | None,
+    *,
+    enabled: bool,
+) -> Iterator[int]:
+    """Stage expanded precision-aware Adam checkpoint tensors on CPU.
+
+    Transformer Engine's precision-aware FusedAdam exposes portable checkpoint
+    state by expanding compressed moments to FP32. Its default ``state_dict``
+    path retains those expansions on GPU until the complete state dictionary is
+    built for saving or load scaffolding, which can exceed device memory even
+    when training fits. This context preserves the same unscaled checkpoint
+    values and dtypes, but moves each tensor to CPU immediately so only one
+    expansion is live on GPU at a time.
+
+    Args:
+        optimizer: Optimizer participating in checkpointing.
+        enabled: Whether to stage compatible optimizer state on CPU.
+
+    Yields:
+        Number of compatible FusedAdam instances using CPU staging.
+    """
+    if not enabled or optimizer is None:
+        yield 0
+        return
+
+    fused_adam_class = _get_te_fused_adam_class()
+    if fused_adam_class is None:
+        yield 0
+        return
+
+    chained_optimizers = getattr(optimizer, "chained_optimizers", None)
+    sub_optimizers = chained_optimizers if isinstance(chained_optimizers, (list, tuple)) else [optimizer]
+    missing_method = object()
+    patched: list[tuple[torch.optim.Optimizer, object]] = []
+
+    try:
+        for distributed_optimizer in sub_optimizers:
+            if getattr(distributed_optimizer, "is_stub_optimizer", False):
+                continue
+            if not getattr(getattr(distributed_optimizer, "config", None), "use_precision_aware_optimizer", False):
+                continue
+            if getattr(getattr(distributed_optimizer, "config", None), "optimizer_cpu_offload", False):
+                continue
+            if getattr(getattr(distributed_optimizer, "ddp_config", None), "use_megatron_fsdp", False):
+                continue
+
+            inner = getattr(distributed_optimizer, "optimizer", None)
+            if not isinstance(inner, fused_adam_class):
+                continue
+            state_dtype_map = getattr(inner, "name_to_dtype_map", None)
+            if not isinstance(state_dtype_map, Mapping) or all(
+                dtype == torch.float32 for dtype in state_dtype_map.values()
+            ):
+                continue
+
+            original_get_unscaled_state = getattr(inner, "get_unscaled_state", None)
+            if not callable(original_get_unscaled_state):
+                raise RuntimeError(
+                    "CPU checkpoint staging requires Transformer Engine FusedAdam.get_unscaled_state() "
+                    "to be callable. The installed Transformer Engine checkpoint API is incompatible."
+                )
+
+            previous_instance_method = inner.__dict__.get("get_unscaled_state", missing_method)
+            setattr(inner, "get_unscaled_state", _cpu_staging_get_unscaled_state(original_get_unscaled_state))
+            patched.append((inner, previous_instance_method))
+
+        if patched:
+            G_LOGGER.info(
+                "Enabled CPU staging for %d precision-aware Transformer Engine FusedAdam checkpoint state(s).",
+                len(patched),
+            )
+
+        yield len(patched)
+    finally:
+        for inner, previous_instance_method in patched:
+            if previous_instance_method is missing_method:
+                delattr(inner, "get_unscaled_state")
+            else:
+                setattr(inner, "get_unscaled_state", previous_instance_method)
 
 
 @contextmanager
@@ -183,11 +280,7 @@ def memory_efficient_fp32_optimizer_state_loading(
         yield 0
         return
 
-    sub_optimizers = (
-        optimizer.chained_optimizers
-        if hasattr(optimizer, "chained_optimizers")
-        else [optimizer]
-    )
+    sub_optimizers = optimizer.chained_optimizers if hasattr(optimizer, "chained_optimizers") else [optimizer]
     missing_method = object()
     patched: list[tuple[torch.optim.Optimizer, object]] = []
 
@@ -220,37 +313,28 @@ def memory_efficient_fp32_optimizer_state_loading(
 
             state_dtype_map = getattr(inner, "name_to_dtype_map", None)
             if not isinstance(state_dtype_map, Mapping) or any(
-                state_dtype_map.get(name) != torch.float32
-                for name in ("exp_avg", "exp_avg_sq")
+                state_dtype_map.get(name) != torch.float32 for name in ("exp_avg", "exp_avg_sq")
             ):
                 continue
 
-            params = [
-                param for group in inner.param_groups for param in group["params"]
-            ]
+            params = [param for group in inner.param_groups for param in group["params"]]
             if not params or any(param.dtype != torch.float32 for param in params):
                 continue
 
-            original_load_state_dict: Callable[[dict[str, object]], None] = (
-                inner.load_state_dict
-            )
+            original_load_state_dict: Callable[[dict[str, object]], None] = inner.load_state_dict
 
             def _load_state_dict_without_fp32_reallocation(
                 fused_adam: torch.optim.Optimizer,
                 state_dict: dict[str, object],
                 *,
-                _fallback: Callable[
-                    [dict[str, object]], None
-                ] = original_load_state_dict,
+                _fallback: Callable[[dict[str, object]], None] = original_load_state_dict,
             ) -> None:
                 if not _optimizer_state_is_fp32_adam(state_dict):
                     _fallback(state_dict)
                     return
                 torch.optim.Optimizer.load_state_dict(fused_adam, state_dict)
 
-            previous_instance_method = inner.__dict__.get(
-                "load_state_dict", missing_method
-            )
+            previous_instance_method = inner.__dict__.get("load_state_dict", missing_method)
             setattr(
                 inner,
                 "load_state_dict",
@@ -335,9 +419,7 @@ def sync_hybrid_device_optimizer_fp32_master_copies(
                     continue
                 param_range_map = distrib_opt._get_model_param_range_map(model_param)
                 param_range = param_range_map["param"]
-                shard_model_param = model_param.view(-1)[
-                    param_range.start : param_range.end
-                ]
+                shard_model_param = model_param.view(-1)[param_range.start : param_range.end]
                 shard_main_param.data.copy_(shard_model_param)
 
         # Level 2: CPU clones the CPU sub-optimizer steps against.
