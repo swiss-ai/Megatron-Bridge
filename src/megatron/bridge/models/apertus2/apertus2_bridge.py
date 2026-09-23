@@ -21,10 +21,7 @@ import torch
 from megatron.core.activations import sssglu_act
 from megatron.core.models.gpt.gpt_model import GPTModel
 
-from megatron.bridge.models.apertus2.apertus2_builder import (
-    Apertus2ModelConfig,
-    Apertus2TransformerConfig,
-)
+from megatron.bridge.models.apertus2.apertus2_builder import Apertus2ModelConfig
 from megatron.bridge.models.apertus2.apertus2_mapping import (
     build_apertus2_mapping_registry,
 )
@@ -150,7 +147,6 @@ class Apertus2Bridge(MegatronModelBridge[Any, Apertus2ModelProvider, GPTModel]):
     """Bridge Apertus2 configs while retaining MCore's virtual KDA checkpoint keys."""
 
     MODEL_CONFIG_CLASS = Apertus2ModelConfig
-    TRANSFORMER_CONFIG_CLASS = Apertus2TransformerConfig
 
     def _apertus2_kwargs(self, hf_config: Any) -> dict[str, Any]:
         """Translate all config controls that affect model math or state layout."""

@@ -44,6 +44,7 @@ class Apertus2ModelConfig(BridgeGPTModelConfig):
     """Serializable GPT config that resolves to :class:`Apertus2ModelBuilder`."""
 
     builder: ClassVar[str] = "megatron.bridge.models.apertus2.Apertus2ModelBuilder"
+    transformer_config_class: ClassVar[type[Apertus2TransformerConfig]] = Apertus2TransformerConfig
 
 
 class Apertus2ModelBuilder(GPTModelBuilder):

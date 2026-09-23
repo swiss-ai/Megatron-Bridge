@@ -34,10 +34,11 @@ from megatron.bridge.models.conversion.param_mapping import (
     ReplicatedMapping,
     RowParallelMapping,
 )
-from megatron.bridge.models.deepseek import (
-    DeepSeekV2Bridge,
-    DeepSeekV3Bridge,
-)
+from megatron.bridge.models.deepseek import DEEPSEEK_AVAILABLE
+
+
+if DEEPSEEK_AVAILABLE:
+    from megatron.bridge.models.deepseek import DeepSeekV2Bridge, DeepSeekV3Bridge
 from megatron.bridge.models.ernie import (
     Ernie45Bridge,
 )
@@ -146,10 +147,11 @@ from megatron.bridge.models.muse_glimmer import (
 from megatron.bridge.models.nemotron import (
     NemotronBridge,
 )
-from megatron.bridge.models.nemotron_omni import (
-    NemotronOmniBridge,
-    NemotronOmniModel,
-)
+from megatron.bridge.models.nemotron_omni import NEMOTRON_OMNI_AVAILABLE
+
+
+if NEMOTRON_OMNI_AVAILABLE:
+    from megatron.bridge.models.nemotron_omni import NemotronOmniBridge, NemotronOmniModel
 from megatron.bridge.models.nemotron_vl import (
     NemotronVLBridge,
     NemotronVLModel,
@@ -229,9 +231,7 @@ __all__ = [
     "Apertus2ModelBuilder",
     "Apertus2ModelConfig",
     "Apertus2ModelProvider",
-    # DeepSeek Models
-    "DeepSeekV2Bridge",
-    "DeepSeekV3Bridge",
+    # DeepSeek Models are appended when the MCore MLA resolver is available.
     # ERNIE Text-Only Models
     "Ernie45Bridge",
     # ERNIE VL Models
@@ -318,8 +318,7 @@ __all__ = [
     "NemotronVLModel",
     "NemotronVLBridge",
     "NemotronVLModelProvider",
-    "NemotronOmniBridge",
-    "NemotronOmniModel",
+    # Nemotron Omni models are appended when MCore dynamic-resolution CP is available.
     # ASR Models
     "Qwen3ASRBridge",
     "Qwen3ASRModel",
@@ -345,3 +344,8 @@ __all__ = [
     "ExaoneMoeBridge",
     "ExaoneMoeModelProvider",
 ]
+
+if DEEPSEEK_AVAILABLE:
+    __all__.extend(("DeepSeekV2Bridge", "DeepSeekV3Bridge"))
+if NEMOTRON_OMNI_AVAILABLE:
+    __all__.extend(("NemotronOmniBridge", "NemotronOmniModel"))
