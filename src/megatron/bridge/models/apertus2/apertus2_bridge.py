@@ -15,7 +15,6 @@
 
 """Hugging Face adapter for the native Apertus2 model family."""
 
-from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -148,7 +147,6 @@ class Apertus2Bridge(MegatronModelBridge[Any, Apertus2ModelProvider, GPTModel]):
     """Bridge Apertus2 configs while retaining MCore's virtual KDA checkpoint keys."""
 
     MODEL_CONFIG_CLASS = Apertus2ModelConfig
-    HF_EXPORT_IGNORED_SOURCE_KEY_SUFFIXES = (".mlp.gate.e_score_correction_bias",)
 
     def _apertus2_kwargs(self, hf_config: Any) -> dict[str, Any]:
         """Translate all config controls that affect model math or state layout."""
@@ -173,7 +171,7 @@ class Apertus2Bridge(MegatronModelBridge[Any, Apertus2ModelProvider, GPTModel]):
                 raise ValueError("KDA key/value head counts must match")
             gate_bias = getattr(hf_config, "linear_attn_output_gate_bias", None)
             if gate_bias is None:
-                gate_bias = True
+                gate_bias = False
             if not isinstance(gate_bias, bool):
                 raise ValueError("linear_attn_output_gate_bias must be a boolean")
             if bool(getattr(hf_config, "linear_attention_full_rank_output_gate", False)):
@@ -185,7 +183,7 @@ class Apertus2Bridge(MegatronModelBridge[Any, Apertus2ModelProvider, GPTModel]):
                 raise ValueError("linear_attn_a_log_per_channel must be a boolean")
         else:
             geometry = {}
-            gate_bias = True
+            gate_bias = False
             a_log_per_channel = False
 
         tie_embeddings = bool(getattr(hf_config, "tie_word_embeddings", False))
@@ -289,7 +287,7 @@ class Apertus2Bridge(MegatronModelBridge[Any, Apertus2ModelProvider, GPTModel]):
             "linear_attention_safe_output_gate": bound is not None,
             "linear_attention_safe_output_gate_lower_bound": (float(bound) if bound is not None else -5.0),
             "linear_attention_output_gate_form": "per_channel",
-            "linear_attn_output_gate_bias": gate_bias,
+            "kda_legacy_gate_out_proj_bias": gate_bias,
             "linear_attn_a_log_per_channel": a_log_per_channel,
             "normalization": "RMSNorm",
             "qk_layernorm": bool(getattr(hf_config, "use_qk_norm", True)),
@@ -504,7 +502,7 @@ class Apertus2Bridge(MegatronModelBridge[Any, Apertus2ModelProvider, GPTModel]):
                         if bool(getattr(provider, "linear_attention_safe_output_gate", False))
                         else None
                     ),
-                    "linear_attn_output_gate_bias": bool(getattr(provider, "linear_attn_output_gate_bias", True)),
+                    "linear_attn_output_gate_bias": bool(getattr(provider, "kda_legacy_gate_out_proj_bias", False)),
                     "linear_attn_a_log_per_channel": bool(getattr(provider, "linear_attn_a_log_per_channel", False)),
                 }
             )
@@ -529,16 +527,6 @@ class Apertus2Bridge(MegatronModelBridge[Any, Apertus2ModelProvider, GPTModel]):
     def mapping_registry(self) -> MegatronMappingRegistry:
         """Return schedule-specific virtual-key mappings."""
         return build_apertus2_mapping_registry(self.hf_config)
-
-    def maybe_modify_loaded_hf_weight(
-        self, hf_param: str | dict[str, str], hf_state_dict: Mapping[str, torch.Tensor]
-    ) -> torch.Tensor | dict[str, torch.Tensor]:
-        """Accept old QB exports only when their unused correction buffer is zero."""
-        if isinstance(hf_param, str) and hf_param.endswith(".gate.qb_beta"):
-            correction = hf_param.removesuffix("qb_beta") + "e_score_correction_bias"
-            if correction in hf_state_dict and torch.count_nonzero(hf_state_dict[correction]):
-                raise ValueError(f"QB-only Apertus2 cannot discard nonzero legacy correction buffer {correction}")
-        return super().maybe_modify_loaded_hf_weight(hf_param, hf_state_dict)
 
 
 __all__ = ["Apertus2Bridge"]

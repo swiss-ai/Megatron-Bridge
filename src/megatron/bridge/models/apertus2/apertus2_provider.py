@@ -77,7 +77,7 @@ class Apertus2ModelProvider(GPTModelProvider):
     transformer_impl: str = "transformer_engine"
     moe_grouped_gemm: bool = True
 
-    # Routing is sigmoid, computed in FP32, and uses a static correction buffer from HF.
+    # Routing is sigmoid, computed in FP32, with QB thresholds stored in HF.
     moe_router_pre_softmax: bool = False
     moe_router_score_function: str = "sigmoid"
     moe_router_dtype: str = "fp32"
@@ -96,8 +96,7 @@ class Apertus2ModelProvider(GPTModelProvider):
     linear_attention_safe_output_gate: bool = False
     linear_attention_safe_output_gate_lower_bound: float = -5.0
     linear_attention_output_gate_form: str = "per_channel"
-    linear_attn_output_gate_bias: bool = True
-    kda_legacy_gate_out_proj_bias: bool = True
+    kda_legacy_gate_out_proj_bias: bool = False
     linear_attn_a_log_per_channel: bool = False
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None):

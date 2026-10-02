@@ -119,7 +119,7 @@ def _provider(**overrides):
         "linear_attention_freq": [1, 1, 1, 0],
         "linear_attention_safe_output_gate": True,
         "linear_attention_safe_output_gate_lower_bound": -5.0,
-        "linear_attn_output_gate_bias": True,
+        "kda_legacy_gate_out_proj_bias": True,
         "linear_conv_kernel_dim": 4,
         "linear_key_head_dim": 8,
         "linear_num_key_heads": 4,
@@ -174,6 +174,31 @@ class TestApertus2ConfigConversion:
         assert result["params_dtype"] is torch.bfloat16
         assert result["activation_func"] is sssglu_act
         assert result["linear_attn_a_log_per_channel"] is False
+        assert result["kda_legacy_gate_out_proj_bias"] is True
+        assert (
+            Apertus2Bridge().hf_config_to_provider_kwargs(_hf_config(linear_attn_output_gate_bias=False))[
+                "kda_legacy_gate_out_proj_bias"
+            ]
+            is False
+        )
+        unspecified_config = _hf_config()
+        del unspecified_config.linear_attn_output_gate_bias
+        assert (
+            Apertus2Bridge().hf_config_to_provider_kwargs(unspecified_config)["kda_legacy_gate_out_proj_bias"] is False
+        )
+        assert (
+            Apertus2Bridge().hf_config_to_provider_kwargs(_hf_config(linear_attn_output_gate_bias=None))[
+                "kda_legacy_gate_out_proj_bias"
+            ]
+            is False
+        )
+        assert Apertus2ModelProvider().kda_legacy_gate_out_proj_bias is False
+        assert (
+            Apertus2Bridge().hf_config_to_provider_kwargs(_hf_config(linear_attn_output_gate_bias=True))[
+                "kda_legacy_gate_out_proj_bias"
+            ]
+            is True
+        )
 
     def test_per_channel_a_log_layout_round_trips(self):
         bridge = Apertus2Bridge()
@@ -209,7 +234,8 @@ class TestApertus2ConfigConversion:
         assert result.params_dtype is torch.bfloat16
         assert result.share_embeddings_and_output_weights is False
         assert result.transformer.layer_types == tuple(_hf_config().layer_types)
-        assert result.transformer.linear_attn_output_gate_bias is True
+        assert result.transformer.kda_legacy_gate_out_proj_bias is True
+        assert result.transformer.linear_attn_a_log_per_channel is False
         assert result.transformer_layer_spec is None
 
     def test_non_qb_routing_is_rejected(self):
@@ -225,20 +251,6 @@ class TestApertus2ConfigConversion:
     def test_qb_with_native_expert_bias_is_rejected(self):
         with pytest.raises(ValueError, match="expert_bias=False"):
             Apertus2Bridge().hf_config_to_provider_kwargs(_hf_config(moe_router_enable_expert_bias=True))
-
-    @pytest.mark.parametrize("correction_value", [None, 0.0, 1.0])
-    def test_old_hf_qb_thresholds_load_only_with_zero_correction(self, correction_value):
-        beta_name = "model.layers.1.mlp.gate.qb_beta"
-        beta = torch.tensor([0.13, -0.7], dtype=torch.float32)
-        state = {beta_name: beta}
-        if correction_value is not None:
-            state["model.layers.1.mlp.gate.e_score_correction_bias"] = torch.full_like(beta, correction_value)
-        bridge = Apertus2Bridge()
-        if correction_value:
-            with pytest.raises(ValueError, match="nonzero legacy correction buffer"):
-                bridge.maybe_modify_loaded_hf_weight(beta_name, state)
-        else:
-            assert torch.equal(bridge.maybe_modify_loaded_hf_weight(beta_name, state), beta)
 
     @pytest.mark.parametrize(
         ("use_qb", "routing"),
@@ -371,7 +383,7 @@ class TestApertus2MixedPrecision:
         provider = Apertus2ModelProvider()
 
         assert _preserve_kda_decay_parameters in provider._pre_wrap_hooks
-        assert provider.kda_legacy_gate_out_proj_bias is True
+        assert provider.kda_legacy_gate_out_proj_bias is False
 
     def test_preserves_kda_decay_parameters_in_fp32(self):
         module = KimiDeltaAttention.__new__(KimiDeltaAttention)

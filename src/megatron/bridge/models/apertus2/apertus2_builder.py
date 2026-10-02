@@ -53,7 +53,6 @@ class Apertus2TransformerConfig(TransformerConfig):
     """Apertus2-only schedule fields kept on the transformer config."""
 
     layer_types: tuple[str, ...] | None = None
-    linear_attn_output_gate_bias: bool = True
     linear_attn_a_log_per_channel: bool = False
 
 
