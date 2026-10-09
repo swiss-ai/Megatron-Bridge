@@ -16,7 +16,6 @@ import abc
 import contextlib
 import fnmatch
 import gc
-import itertools
 import logging
 import math
 import re
@@ -69,9 +68,9 @@ from megatron.bridge.models.conversion.transformers_compat import (
     rope_theta_from_hf,
 )
 from megatron.bridge.models.conversion.utils import (
+    _iter_model_parameters_and_buffers,
     extract_sort_key,
     get_module_and_param_from_name,
-    persistent_buffers,
     unwrap_model,
 )
 from megatron.bridge.models.decorators.dispatch import dispatch
@@ -992,7 +991,7 @@ class MegatronModelBridge(
 
         for vp_stage, model in enumerate(models_list):
             # persistent buffers are part of the model's state_dict, but not the named_parameters, so we must include them here separately
-            for local_param_name, _ in itertools.chain(model.named_parameters(), persistent_buffers(model)):
+            for local_param_name, _ in _iter_model_parameters_and_buffers(model):
                 if "_extra_state" in local_param_name:
                     continue
                 local_param_name = self._unwrap_name(local_param_name)
@@ -1683,6 +1682,16 @@ class MegatronModelBridge(
                 megatron_weights = None
                 megatron_module = None
 
+            # NCCL collectives require CUDA tensors, including live CPU master views.
+            if (
+                megatron_weights is not None
+                and megatron_weights.device.type == "cpu"
+                and torch.distributed.is_initialized()
+            ):
+                groups = (task.mapping.tp_group, task.mapping.ep_group, task.mapping.pp_group)
+                if any(group is not None and torch.distributed.get_backend(group) == "nccl" for group in groups):
+                    megatron_weights = megatron_weights.to(torch.cuda.current_device())
+
             converted_weights_dict = task.mapping.megatron_to_hf(megatron_weights, megatron_module)
             adapter_tasks = None
             task_global_base_prefix = None
@@ -2066,7 +2075,7 @@ class MegatronModelBridge(
         pending_tasks: list[WeightConversionTask | None] = [None] * len(sorted_global_param_names_all_pp_ranks)
         for vp_stage, model in enumerate(megatron_model):
             # persistent buffers are part of the model's state_dict, but not the named_parameters, so we must include them here separately
-            for local_name, _ in itertools.chain(model.named_parameters(), persistent_buffers(model)):
+            for local_name, _ in _iter_model_parameters_and_buffers(model):
                 if "_extra_state" in local_name or self._is_adapter_param_name(local_name):
                     continue
 
@@ -2211,7 +2220,7 @@ class MegatronModelBridge(
         scale_inv_metadata_key = fp8_scale_inv_attr.removeprefix("_")
 
         for vp_stage, model in enumerate(megatron_model):
-            for local_name, _ in itertools.chain(model.named_parameters(), persistent_buffers(model)):
+            for local_name, _ in _iter_model_parameters_and_buffers(model):
                 if "_extra_state" in local_name or self._is_adapter_param_name(local_name):
                     continue
 
@@ -2325,7 +2334,7 @@ class MegatronModelBridge(
 
         # 3) Fill tasks for params that are local to this rank.
         for vp_stage, model in enumerate(megatron_model):
-            for local_name, _ in itertools.chain(model.named_parameters(), persistent_buffers(model)):
+            for local_name, _ in _iter_model_parameters_and_buffers(model):
                 if "_extra_state" in local_name or self._is_adapter_param_name(local_name):
                     continue
 

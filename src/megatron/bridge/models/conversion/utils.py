@@ -105,6 +105,106 @@ def weights_verification_table(bridge, megatron_model) -> Table:
     return table
 
 
+class _OffloadingExpertLinearView(torch.nn.Module):
+    """Expose one live master weight from the offloading expert kernel."""
+
+    def __init__(self, kernel: torch.nn.Module, weight: torch.Tensor, partition_dim: int, num_experts: int):
+        super().__init__()
+        object.__setattr__(self, "_source_kernel", kernel)
+        self.weight = weight
+        self.config = kernel.config
+        self.num_gemms = num_experts
+        self.num_local_experts = num_experts
+        self.tensor_model_parallel = True
+        self.partition_dim = partition_dim
+
+
+def _is_offloading_experts_mlp(module: torch.nn.Module) -> bool:
+    """Require the kernel when expert offloading is enabled."""
+    config = getattr(module, "config", None)
+    if not getattr(config, "moe_use_offloading_experts", False):
+        return False
+    try:
+        from megatron.core.transformer.moe.experts import OffloadingExpertsMLP
+    except ImportError as error:
+        raise RuntimeError(
+            "Expert offloading requires OffloadingExpertsMLP in the active Megatron-Core; "
+            "this Megatron-Core version does not provide it."
+        ) from error
+    return isinstance(module, OffloadingExpertsMLP)
+
+
+def _offloading_expert_weight_views(kernel: torch.nn.Module) -> list[tuple[str, torch.Tensor, int]]:
+    """Build canonical per-expert aliases for a supported live BF16 fused master."""
+    config = kernel.config
+    if not getattr(config, "moe_use_inplace_fp8_param", False):
+        raise ValueError("OffloadingExpertsMLP non-inplace per-expert views are not supported")
+    if not getattr(config, "moe_use_extra_fp8_param_storage", False):
+        raise ValueError("OffloadingExpertsMLP BF16 masters require moe_use_extra_fp8_param_storage=True")
+
+    result = []
+    for number, name, partition_dim in ((1, "linear_fc1", 0), (2, "linear_fc2", 1)):
+        source = getattr(kernel, f"weight{number}", None)
+        if not isinstance(source, torch.Tensor) or source.ndim != 3:
+            raise ValueError(f"OffloadingExpertsMLP weight{number} is not a fused expert tensor")
+        if source.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+            raise ValueError(f"OffloadingExpertsMLP weight{number} has no BF16 master view")
+        for index in range(source.shape[0]):
+            # In-place FP8 masters use TE [out, in] orientation. The per-expert
+            # slice is therefore already the canonical weight and writes through.
+            result.append((f"{name}.weight{index}", source[index], partition_dim))
+    return result
+
+
+def _iter_model_parameters_and_buffers(model: torch.nn.Module):
+    """Yield ordinary state and canonical live views of offloading experts."""
+    kernels = [(name, child) for name, child in model.named_modules() if _is_offloading_experts_mlp(child)]
+    aliases: list[tuple[str, torch.Tensor]] = []
+    omitted_prefixes = []
+    for prefix, kernel in kernels:
+        omitted_prefixes.append(f"{prefix}.weight1" if prefix else "weight1")
+        omitted_prefixes.append(f"{prefix}.weight2" if prefix else "weight2")
+        for alias, tensor, _ in _offloading_expert_weight_views(kernel):
+            aliases.append((f"{prefix}.{alias}" if prefix else alias, tensor))
+
+    for name, param in model.named_parameters():
+        if any(name == prefix or name.startswith(prefix + "_") for prefix in omitted_prefixes):
+            continue
+        yield name, param
+    yield from aliases
+    yield from persistent_buffers(model)
+
+
+def _resolve_offloading_expert_view(
+    model: torch.nn.Module, param_name: str
+) -> tuple[torch.nn.Module, torch.Tensor] | None:
+    """Resolve a canonical per-expert alias to a fresh, writable source view."""
+    parts = param_name.split(".")
+    for end in range(len(parts) - 1, -1, -1):
+        kernel = model
+        try:
+            for part in parts[:end]:
+                kernel = getattr(kernel, part)
+        except (AttributeError, IndexError, KeyError):
+            continue
+        if not _is_offloading_experts_mlp(kernel):
+            continue
+        alias_parts = parts[end:]
+        if len(alias_parts) != 2 or alias_parts[0] not in ("linear_fc1", "linear_fc2"):
+            continue
+        match = re.fullmatch(r"weight(\d+)", alias_parts[1])
+        if match is None:
+            continue
+        weights = {name: (tensor, dim) for name, tensor, dim in _offloading_expert_weight_views(kernel)}
+        alias = f"{alias_parts[0]}.{alias_parts[1]}"
+        if alias not in weights:
+            continue
+        tensor, partition_dim = weights[alias]
+        proxy = _OffloadingExpertLinearView(kernel, tensor, partition_dim, kernel.num_local_experts)
+        return proxy, tensor
+    return None
+
+
 def get_module_and_param_from_name(
     models: MegatronModule | List[MegatronModule],
     param_name: str,
@@ -174,6 +274,9 @@ def get_module_and_param_from_name(
         model = models
 
     module = unwrap_model(model)
+    virtual = _resolve_offloading_expert_view(module, param_name)
+    if virtual is not None:
+        return virtual
     splitted_name = param_name.split(".")
 
     # Try to find the parameter using the given parts
