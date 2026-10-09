@@ -38,6 +38,19 @@ Apertus2 conversion supports quantile balancing only. HF configs must declare
 `quantile_balancing`, with `moe_router_enable_expert_bias=False`. Both sigmoid
 and legacy raw-logit QB score spaces are preserved.
 
+Native `marin_histogram` routing currently exports
+`moe_router_quantile_balancing_method="legacy"` in the HF config. The name
+`"legacy"` is a temporary compatibility label for the existing HF/vLLM option:
+expert selection uses raw `logits - qb_beta`, while mixture weights use the
+unbiased sigmoid scores. The `qb_beta` tensor mapping and FP32 preservation
+are unchanged.
+The HF `"legacy"` value describes inference routing, not the Marin training
+estimator; importing it defaults to `legacy_average`. To continue Marin training,
+explicitly select `marin_histogram` and its estimator settings with a compatible
+MCore version. Bridge accepts the native method name but does not add Marin
+support to an older MCore. The HF reference modeling code must support raw-logit
+QB selection as well.
+
 ### Explicit Apertus2 KDA layout settings
 
 Supply the KDA gate-bias and `A_log` layout flags explicitly. Bridge does not

@@ -199,7 +199,7 @@ class Apertus2Bridge(MegatronModelBridge[Any, Apertus2ModelProvider, GPTModel]):
             raise ValueError("Apertus2 QB-only conversion requires moe_router_enable_expert_bias=False")
         qb_method = getattr(hf_config, "moe_router_quantile_balancing_method", "sigmoid")
         qb_method = {"sigmoid": "histogram", "legacy": "legacy_average"}.get(qb_method, qb_method)
-        if use_qb and qb_method not in ("average", "legacy_average", "histogram"):
+        if use_qb and qb_method not in ("average", "legacy_average", "histogram", "marin_histogram"):
             raise ValueError(f"Unsupported quantile balancing method: {qb_method!r}")
         # The canonical Apertus2 checkpoints use quantile balancing alone. MCore also
         # accepts a list with an independent sequence auxiliary-loss term; preserve that
@@ -426,6 +426,7 @@ class Apertus2Bridge(MegatronModelBridge[Any, Apertus2ModelProvider, GPTModel]):
             "average": "sigmoid",
             "histogram": "sigmoid",
             "legacy_average": "legacy",
+            "marin_histogram": "legacy",
         }.get(qb_method, qb_method)
         if use_qb and qb_method not in ("sigmoid", "legacy"):
             raise ValueError(f"Unsupported quantile balancing method: {qb_method!r}")

@@ -218,6 +218,44 @@ class TestApertus2ConfigConversion:
         with pytest.raises(ValueError, match="linear_attn_a_log_per_channel must be a boolean"):
             Apertus2Bridge().hf_config_to_provider_kwargs(_hf_config(linear_attn_a_log_per_channel="true"))
 
+    @pytest.mark.parametrize(
+        ("hf_method", "native_method"),
+        [
+            ("sigmoid", "histogram"),
+            ("average", "average"),
+            ("histogram", "histogram"),
+            ("legacy", "legacy_average"),
+            ("legacy_average", "legacy_average"),
+            ("marin_histogram", "marin_histogram"),
+        ],
+    )
+    def test_hf_to_megatron_preserves_qb_method(self, hf_method, native_method):
+        result = Apertus2Bridge().hf_config_to_provider_kwargs(
+            _hf_config(moe_router_quantile_balancing_method=hf_method)
+        )
+
+        assert result["moe_router_quantile_balancing_method"] == native_method
+
+    @pytest.mark.parametrize(
+        ("native_method", "hf_method"),
+        [
+            ("average", "sigmoid"),
+            ("histogram", "sigmoid"),
+            ("legacy_average", "legacy"),
+            ("marin_histogram", "legacy"),
+        ],
+    )
+    def test_native_qb_method_exports_matching_score_space(self, native_method, hf_method):
+        result = Apertus2Bridge.megatron_to_hf_config(_provider(moe_router_quantile_balancing_method=native_method))
+
+        assert result["moe_router_quantile_balancing_method"] == hf_method
+
+    def test_unsupported_qb_method_is_rejected(self):
+        with pytest.raises(ValueError, match="Unsupported quantile balancing method"):
+            Apertus2Bridge().hf_config_to_provider_kwargs(_hf_config(moe_router_quantile_balancing_method="unknown"))
+        with pytest.raises(ValueError, match="Unsupported quantile balancing method"):
+            Apertus2Bridge.megatron_to_hf_config(_provider(moe_router_quantile_balancing_method="unknown"))
+
     def test_builder_config_preserves_apertus2_fields(self):
         result = Apertus2Bridge().hf_config_to_model_config(_hf_config())
 
