@@ -182,6 +182,27 @@ Implementation notes (from code):
 - FP8 export: Tensors are dequantized on export when using FP8 tensor classes (see `maybe_dequantize` in [param_mapping.py](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/conversion/param_mapping.py)).
 - MoE experts: Expert parameter names are normalized for lookup and expert shards are gathered across EP ranks and re-emitted per global expert id (see `gather_from_ep_ranks` in [param_mapping.py](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/conversion/param_mapping.py)).
 
+### Offloading experts
+
+The shared conversion path supports `OffloadingExpertsMLP` when the active
+Megatron-Core provides that kernel. The supported implementation is in the
+[SwissAI Megatron-Core fork, pinned at `a9e0c497`](https://github.com/andresnowak/Megatron-LM-MoE/blob/a9e0c497bbab7e01ea80f363925f3b41a43aee0b/megatron/core/transformer/moe/experts.py#L1224),
+used by [Megatron-Core PR #88](https://github.com/swiss-ai/Megatron-LM-MoE/pull/88).
+Enable `moe_use_offloading_experts`,
+`moe_use_inplace_fp8_param`, and `moe_use_extra_fp8_param_storage` together.
+The extra storage must preserve floating-point master weights; packed FP8 bytes
+are not a supported master-weight source.
+
+Bridge exposes each fused expert master as a live `linear_fc1.weightN` or
+`linear_fc2.weightN` view. HF imports write into the original storage. Exports
+read the current master weights, not a cached copy. Existing model-family
+mappings and expert-parallel name offsets still apply. CPU master weights are
+staged to CUDA before export collectives that use NCCL.
+
+Conversion fails explicitly if the offloading kernel or supported master layout
+is unavailable. This support is for Bridge conversion; it does not add fused
+expert-layout support to native Megatron-Core resharding.
+
 ## Architecture-specific bridge example: Qwen3
 
 Embedded from `src/megatron/bridge/models/qwen/qwen3_bridge.py`:

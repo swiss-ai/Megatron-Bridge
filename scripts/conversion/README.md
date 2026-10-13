@@ -31,6 +31,77 @@ renamed or inserted as `run_config.yaml`.
 
 ## Local CPU conversion
 
+### Apertus2 routing contract
+
+Apertus2 conversion supports quantile balancing only. HF configs must declare
+`use_quantile_balancing=True`; native checkpoint routing must include
+`quantile_balancing`, with `moe_router_enable_expert_bias=False`. Both sigmoid
+and legacy raw-logit QB score spaces are preserved.
+
+Native `marin_histogram` routing currently exports
+`moe_router_quantile_balancing_method="legacy"` in the HF config. The name
+`"legacy"` is a temporary compatibility label for the existing HF/vLLM option:
+expert selection uses raw `logits - qb_beta`, while mixture weights use the
+unbiased sigmoid scores. The `qb_beta` tensor mapping and FP32 preservation
+are unchanged.
+The HF `"legacy"` value describes inference routing, not the Marin training
+estimator; importing it defaults to `legacy_average`. To continue Marin training,
+explicitly select `marin_histogram` and its estimator settings with a compatible
+MCore version. Bridge accepts the native method name but does not add Marin
+support to an older MCore. The HF reference modeling code must support raw-logit
+QB selection as well.
+
+### Explicit Apertus2 KDA layout settings
+
+Supply the KDA gate-bias and `A_log` layout flags explicitly. Bridge does not
+infer them from checkpoint tensor shapes or model names. The HF reference
+`config.json` used for conversion must declare both
+`linear_attn_output_gate_bias` and `linear_attn_a_log_per_channel`; config
+conformance drops fields absent from that reference.
+
+| Checkpoint | `kda_legacy_gate_out_proj_bias` | `linear_attn_a_log_per_channel` |
+| --- | ---: | ---: |
+| Chonk (legacy gate bias) | `True` | `False` |
+| Megachonk | `False` | `True` |
+
+For a native checkpoint, set the provider fields through the explicit
+`mp_overrides` argument. Keep the HF reference config values aligned with the
+overrides so the synthesized config retains the same layout:
+
+```python
+from megatron.bridge import AutoBridge
+
+bridge = AutoBridge.from_auto_config(
+    megatron_path="/path/to/native-checkpoint",
+    hf_model_id="/path/to/apertus2-hf-reference",
+    trust_remote_code=True,  # Only use trusted reference Python code.
+    mp_overrides={
+        "kda_legacy_gate_out_proj_bias": True,  # Chonk; use False for Megachonk
+        "linear_attn_a_log_per_channel": False,  # Chonk; use True for Megachonk
+    },
+)
+```
+
+Pass the same `mp_overrides` to `load_megatron_model` when loading native weights.
+
+The config-only `save_hf_weights` path collects the full exported state dict in
+rank-0 CPU memory before sharding, even when distributed saving is requested.
+Successful validation with a bounded scratch writer does not establish that
+this unchanged public saver can fit Megachonk in rank-0 RAM.
+
+For HF import, set `linear_attn_output_gate_bias` and
+`linear_attn_a_log_per_channel` in the source HF config. The
+Apertus2 provider and builder translate the explicit `A_log` config value to
+MCore's `KDA_ALOG_PER_CHANNEL` environment setting during construction; callers
+should not set that environment variable to guess checkpoint layout.
+
+Use the QB-only configuration and modeling files from the updated hfconverter
+as the HF reference assets. Bridge copies custom Python code from the supplied
+reference; updating Bridge does not update the code bundled in an existing
+HF export directory.
+
+### Running locally
+
 Local execution uses the current Megatron Bridge environment and waits for the
 conversion to finish.
 

@@ -14,6 +14,8 @@
 
 import argparse
 import dataclasses
+from collections.abc import Mapping
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -66,21 +68,37 @@ def _tokenizer_config_from_args(args: argparse.Namespace) -> TokenizerConfig:
 
 
 def _transformer_config_from_args(
-    args: argparse.Namespace, config_class: type[TransformerConfig] = TransformerConfig
+    args: argparse.Namespace,
+    config_class: type[TransformerConfig] = TransformerConfig,
+    *,
+    mp_overrides: Mapping[str, Any] | None = None,
 ) -> TransformerConfig:
     """Build a variant of TransformerConfig based on contents of the MLM argparse args object."""
     if args.multi_latent_attention:
-        config_class = MLATransformerConfig
+        if config_class is TransformerConfig:
+            config_class = MLATransformerConfig
+        elif not issubclass(config_class, MLATransformerConfig):
+            raise ValueError(f"{config_class.__name__} cannot represent multi_latent_attention legacy arguments")
 
     if args.heterogeneous_layers_config_path is not None:
         assert not args.multi_latent_attention, "Multi latent attention with heterogeneous layers is not supported."
-        config_class = HeterogeneousTransformerConfig
+        if config_class is TransformerConfig:
+            config_class = HeterogeneousTransformerConfig
+        elif not issubclass(config_class, HeterogeneousTransformerConfig):
+            raise ValueError(f"{config_class.__name__} cannot represent heterogeneous legacy arguments")
 
-    # Translate args to core transformer configuration
+    # Translate args to core transformer configuration.
     kw_args = {}
-    for f in dataclasses.fields(config_class):
-        if hasattr(args, f.name):
-            kw_args[f.name] = getattr(args, f.name)
+    config_fields = {field.name for field in dataclasses.fields(config_class)}
+    for name in config_fields:
+        if hasattr(args, name):
+            kw_args[name] = getattr(args, name)
+    if "vocab_size" in config_fields and hasattr(args, "padded_vocab_size"):
+        kw_args["vocab_size"] = args.padded_vocab_size
+    if "share_embeddings_and_output_weights" in config_fields and hasattr(args, "untie_embeddings_and_output_weights"):
+        kw_args["share_embeddings_and_output_weights"] = not args.untie_embeddings_and_output_weights
+    if "rope_scaling" in config_fields and hasattr(args, "use_rope_scaling"):
+        kw_args["rope_scaling"] = args.use_rope_scaling
     kw_args["persist_layer_norm"] = not args.no_persist_layer_norm
     kw_args["layernorm_zero_centered_gamma"] = getattr(
         args, "layernorm_zero_centered_gamma", getattr(args, "apply_layernorm_1p", False)
@@ -126,5 +144,7 @@ def _transformer_config_from_args(
         kw_args["use_kitchen"] = True
         kw_args["quant_recipe"] = kitchen_quantization_recipe_config(args.kitchen_recipe_number)
 
-    # Return config.
+    # Apply runtime overrides after translating legacy argument aliases.
+    if mp_overrides:
+        kw_args.update({name: value for name, value in mp_overrides.items() if name in config_fields})
     return config_class(**kw_args)

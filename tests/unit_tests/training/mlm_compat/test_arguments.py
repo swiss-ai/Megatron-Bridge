@@ -173,6 +173,26 @@ class TestTransformerConfigFromArgs:
 
         return args
 
+    def test_model_parallel_overrides_follow_legacy_alias_translation(self, basic_args):
+        cfg = _transformer_config_from_args(
+            basic_args,
+            mp_overrides={
+                "tensor_model_parallel_size": 2,
+                "sequence_parallel": True,
+                "pipeline_dtype": torch.bfloat16,
+                "num_layers_in_first_pipeline_stage": None,
+                "num_layers_in_last_pipeline_stage": None,
+            },
+        )
+
+        assert cfg.tensor_model_parallel_size == 2
+        assert cfg.sequence_parallel is True
+        assert cfg.pipeline_dtype == torch.bfloat16
+        assert cfg.num_layers_in_first_pipeline_stage is None
+        assert cfg.num_layers_in_last_pipeline_stage is None
+        assert basic_args.decoder_first_pipeline_num_layers == 4
+        assert basic_args.decoder_last_pipeline_num_layers == 4
+
     def test_basic_transformer_config(self, basic_args):
         """Test basic transformer config creation."""
         cfg = _transformer_config_from_args(basic_args)
@@ -315,6 +335,17 @@ class TestTransformerConfigFromArgs:
         assert cfg.use_kitchen is True
         assert cfg.quant_recipe == mock_recipe
         mock_kitchen_config.assert_called_once_with(42)
+
+    def test_rejects_custom_config_without_mla_fields(self, basic_args):
+        """A custom provider must not be silently replaced by the generic MLA config."""
+
+        @dataclass
+        class CustomTransformerConfig(TransformerConfig):
+            custom_field: int = 42
+
+        basic_args.multi_latent_attention = True
+        with pytest.raises(ValueError, match="cannot represent multi_latent_attention"):
+            _transformer_config_from_args(basic_args, CustomTransformerConfig)
 
     def test_custom_config_class(self, basic_args):
         """Test using a custom config class."""
